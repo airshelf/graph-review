@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Syntax
+        run: python3 -m py_compile review.py convergence.py reach.py stale_guards.py tests/*.py
+      - name: Tests
+        run: uv run --python 3.12 --with pytest --with 'langchain>=1.3' --with 'langgraph>=0.6' python -m pytest -q tests

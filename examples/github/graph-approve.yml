@@ -1,0 +1,117 @@
+name: Graph Approve
+
+# workflow_run executes the default-branch definition. Never check out or run
+# PR code here. Treat the artifact as untrusted until API checks establish its
+# run, head and unchanged review surface, including renamed-away files.
+on:
+  workflow_run:
+    workflows: [Graph Review]
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  approve:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # REQUIRED: restrict this environment to the default branch and store the
+    # App secrets ONLY here. Same-repo PR workflows can read repository secrets.
+    environment: graph-approval
+    steps:
+      - name: Download the triggering run's verdict
+        id: artifact
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name graph-verdict --dir "$RUNNER_TEMP/graph-verdict"
+
+      - name: Validate verdict, run, PR head and review surface
+        id: verdict
+        if: steps.artifact.outcome == 'success'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const hold = reason => core.warning(`Approval withheld: ${reason}`);
+            core.setOutput('go', 'false');
+            try {
+              const repo = `${context.repo.owner}/${context.repo.repo}`;
+              const {data: run} = await github.rest.actions.getWorkflowRun({
+                ...context.repo, run_id: context.payload.workflow_run.id
+              });
+              // The name alone is insufficient: another workflow can copy it.
+              const {data: workflow} = await github.rest.actions.getWorkflow({...context.repo, workflow_id: run.workflow_id});
+              if (workflow.path !== '.github/workflows/graph-review.yml' ||
+                  run.event !== 'pull_request' || run.conclusion !== 'success' ||
+                  run.repository.full_name !== repo || run.head_repository?.full_name !== repo)
+                return hold('untrusted workflow or fork run');
+              const file = path.join(process.env.RUNNER_TEMP, 'graph-verdict', 'graph-verdict.json');
+              const stat = fs.lstatSync(file);
+              if (!stat.isFile() || stat.size > 16384) return hold('invalid artifact file');
+              const verdict = JSON.parse(fs.readFileSync(file, 'utf8'));
+              if (!Number.isSafeInteger(verdict.pr) || verdict.pr <= 0 ||
+                  typeof verdict.reviewed_head !== 'string' || !/^[0-9a-f]{40}$/.test(verdict.reviewed_head) ||
+                  verdict.eligible !== true) return hold('invalid or ineligible verdict');
+              const linked = run.pull_requests.find(p => p.number === verdict.pr && p.head.sha === verdict.reviewed_head);
+              if (!linked || run.head_sha !== verdict.reviewed_head) return hold('run is not tied to this PR head');
+              const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: verdict.pr});
+              // An arbitrary base branch can already contain an untrusted reviewer.
+              if (pr.state !== 'open' || pr.draft || pr.merged || pr.head.sha !== verdict.reviewed_head ||
+                  pr.head.repo?.full_name !== repo || pr.base.repo?.full_name !== repo || pr.base.ref !== linked.base.ref ||
+                  pr.base.ref !== context.payload.repository.default_branch)
+                return hold('fork, closed, draft, stale or non-default-target PR');
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                ...context.repo, pull_number: verdict.pr, per_page: 100
+              });
+              // The files API has a cap. A partial listing cannot prove safety.
+              if (files.length !== pr.changed_files) return hold('incomplete changed-file listing');
+              // Any workflow or action can request the approval environment once merged,
+              // so every change under .github/workflows or .github/actions needs a human.
+              const surface = /^\.github\/(?:workflows|actions)\//;
+              if (files.some(f => surface.test(f.filename) || surface.test(f.previous_filename || '')))
+                return hold('review-surface change requires human approval');
+              core.setOutput('pr', String(verdict.pr));
+              core.setOutput('head', verdict.reviewed_head);
+              core.setOutput('base', pr.base.ref);
+              core.setOutput('go', 'true');
+            } catch (e) { hold(`validation failed: ${e.message}`); }
+
+      - name: Mint the repository-scoped approver App token
+        id: app
+        if: steps.verdict.outputs.go == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GRAPH_APP_ID }}
+          private-key: ${{ secrets.GRAPH_APP_PRIVATE_KEY }}
+
+      - name: Approve the reviewed commit
+        if: steps.app.outcome == 'success' && steps.app.outputs.token != ''
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          PR: ${{ steps.verdict.outputs.pr }}
+          REVIEWED_HEAD: ${{ steps.verdict.outputs.head }}
+          REVIEWED_BASE: ${{ steps.verdict.outputs.base }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const pr = Number(process.env.PR), head = process.env.REVIEWED_HEAD;
+            const {data: live} = await github.rest.pulls.get({...context.repo, pull_number: pr});
+            if (live.state !== 'open' || live.draft || live.head.sha !== head || live.base.ref !== process.env.REVIEWED_BASE)
+              return core.warning('PR changed before approval; waiting for its new review.');
+            // Pin the review itself, not just the earlier metadata check. Enable
+            // stale-approval dismissal in branch protection for later pushes.
+            await github.rest.pulls.createReview({
+              ...context.repo, pull_number: pr, commit_id: head, event: 'APPROVE',
+              body: 'Graph review complete: no verified blockers or majors, and no dead reviewer dimensions. Minors and nits are advisory.'
+            });
+
+      - name: Note missing verdict or App configuration
+        if: always() && (steps.artifact.outcome != 'success' || (steps.verdict.outputs.go == 'true' && (steps.app.outcome != 'success' || steps.app.outputs.token == '')))
+        run: echo "::warning::No usable verdict or approver App token. No approval granted."

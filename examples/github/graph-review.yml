@@ -1,0 +1,123 @@
+name: Graph Review
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+concurrency:
+  group: graph-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      REVIEWED_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        id: target
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        continue-on-error: true
+      - name: Clone the pinned reviewer
+        id: source
+        continue-on-error: true
+        run: |
+          test ! -e .graph-review
+          test ! -L .graph-review
+          git clone --depth 1 --branch v1.0.0 https://github.com/airshelf/graph-review .graph-review
+          git -C .graph-review checkout --detach refs/tags/v1.0.0
+      - name: Run graph review
+        id: review
+        if: steps.target.outcome == 'success' && steps.source.outcome == 'success'
+        timeout-minutes: 22
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UV_NO_CONFIG: 'true' # Ignore PR-owned uv configuration.
+          UV_PYTHON: '3.12' # Do not run a PR-selected interpreter.
+          PROVIDER: ${{ vars.GRAPH_REVIEW_PROVIDER || 'openai' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_NO_TEMPERATURE: ${{ vars.OPENAI_NO_TEMPERATURE }}
+          OPENAI_RESPONSES_API: ${{ vars.OPENAI_RESPONSES_API }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || 'gpt-54-mini' }}
+          AZURE_OPENAI_NO_TEMPERATURE: ${{ vars.AZURE_OPENAI_NO_TEMPERATURE }}
+          AZURE_OPENAI_RESPONSES_API: ${{ vars.AZURE_OPENAI_RESPONSES_API }}
+          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
+          AZURE_FOUNDRY_ENDPOINT: ${{ vars.AZURE_FOUNDRY_ENDPOINT }}
+          AZURE_FOUNDRY_DEPLOYMENT: ${{ vars.AZURE_FOUNDRY_DEPLOYMENT || 'grok-43' }}
+          GOOGLE_GEMINI_API_KEY: ${{ secrets.GOOGLE_GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          VERTEX_PROJECT: ${{ vars.VERTEX_PROJECT }}
+          VERTEX_LOCATION: ${{ vars.VERTEX_LOCATION || 'global' }}
+        run: |
+          gh auth setup-git
+          rc=0
+          uv run .graph-review/review.py --pr "$PR" --provider "$PROVIDER" --json > "$RUNNER_TEMP/graph-review.json" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+      - name: Update the PR comment and write the verdict
+        id: report
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          REVIEW_RC: ${{ steps.review.outputs.rc }}
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const pr = Number(process.env.PR), head = process.env.REVIEWED_HEAD;
+            const marker = '<!-- graph-review -->';
+            let blockers = 0, eligible = false, markdown = 'Reviewer unavailable. Check the workflow warnings. No approval granted.';
+            try {
+              if (process.env.REVIEW_RC !== '0') throw new Error('reviewer failed or timed out');
+              const r = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'graph-review.json'), 'utf8'));
+              if (r.pr !== pr || r.headSha !== head || !Array.isArray(r.findings) ||
+                  !Number.isInteger(r.stats?.gaps) || r.stats.gaps < 0 ||
+                  r.findings.some(f => !['blocker', 'major', 'minor', 'nit'].includes(f.severity))) throw new Error('invalid or stale review');
+              const file = path.resolve(r.markdown_file);
+              if (!file.startsWith(path.resolve('.graph-review/.state') + path.sep)) throw new Error('unexpected report path');
+              markdown = fs.readFileSync(file, 'utf8');
+              if (!markdown.trim()) throw new Error('empty report');
+              blockers = r.findings.filter(f => f.severity === 'blocker').length;
+              eligible = !blockers && !r.findings.some(f => f.severity === 'major') && r.stats.gaps === 0;
+              if (r.stats.gaps) core.warning('Dead reviewer dimensions: approval withheld.');
+              if (!eligible && !blockers) core.notice('Majors or incomplete coverage: approval withheld.');
+              if (!r.stats.gaps) markdown = `<!-- graph-review-head:${head} mode:discovery -->\n\n${markdown}`;
+            } catch (e) {
+              blockers = 0; eligible = false; markdown = 'Reviewer unavailable. Check the workflow warnings. No approval granted.';
+              core.warning(`Graph review unavailable: ${e.message}. Check stays green; no approval.`);
+            }
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'graph-verdict.json'), JSON.stringify({pr, reviewed_head: head, eligible}));
+            core.setOutput('blockers', String(blockers));
+            try {
+              const {data: live} = await github.rest.pulls.get({...context.repo, pull_number: pr});
+              if (live.head.sha !== head) return core.warning('Head moved; not replacing the newer review comment.');
+              const body = `## 🕸️ Graph Review\n${marker}\n\n${markdown}`;
+              const comments = await github.paginate(github.rest.issues.listComments, {...context.repo, issue_number: pr, per_page: 100});
+              const previous = comments.reverse().find(c => c.user?.login === 'github-actions[bot]' && (c.body?.includes(marker) || c.body?.startsWith('## 🕸️ Graph Review')));
+              if (previous) await github.rest.issues.updateComment({...context.repo, comment_id: previous.id, body});
+              else await github.rest.issues.createComment({...context.repo, issue_number: pr, body});
+            } catch (e) { core.warning(`Could not post the review comment: ${e.message}`); }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: graph-verdict
+          path: ${{ runner.temp }}/graph-verdict.json
+          retention-days: 3
+      - name: Fail only on blockers
+        if: always() && steps.report.outputs.blockers != '' && steps.report.outputs.blockers != '0'
+        run: exit 1
