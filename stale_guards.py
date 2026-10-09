@@ -24,7 +24,7 @@ Usage:
   python3 stale_guards.py --base <ref> [--head <ref>] [--judge]
 Exit: 0 report (never fails a build -- this is a question for a reviewer, not a verdict)
       2 refs unresolvable
-      3 --judge requested without TYPESAFE_API_KEY
+      3 --judge requested without TYPESAFE_API_KEY, whether or not the diff has a finding
 """
 from __future__ import annotations
 
@@ -194,11 +194,22 @@ def evidence_for(f: dict, head: str) -> dict:
         if a - start > 40:
             break
         start -= 1
-    sig = next((l for l in blob[start:a] if SIGNATURE_LINE.match(l)), "")
+    # `a` is a 1-based line number and the walk stops with the signature at blob[start - 1]
+    sig = next((l for l in blob[max(start - 1, 0):a] if SIGNATURE_LINE.match(l)), "")
     return {"new_fields": sorted(f["new"]),
             "type_declaration": type_summary(blob, f["type"]),
             "enclosing_signature": scrub(sig).strip() or "(signature not found)",
             "guard_run": scrub("\n".join(t for _, t in f["lines"])).strip()[:1000]}
+
+
+def judge_key() -> str:
+    """The judge's key, or exit 3. main() calls this before reading the diff, so a missing
+    key exits the same way whether or not the diff has a finding to ask about."""
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        print("stale_guards: --judge needs TYPESAFE_API_KEY", file=sys.stderr)
+        raise SystemExit(3)
+    return key
 
 
 def judge(findings: list[dict], head: str = "HEAD") -> dict[str, float]:
@@ -212,10 +223,7 @@ def judge(findings: list[dict], head: str = "HEAD") -> dict[str, float]:
     NEVER ASK A JUDGE WITH EMPTY EVIDENCE. Jev once answered 0.60 on zero bytes, so the
     caller drops any finding with no guard lines rather than sending it.
     """
-    key = os.environ.get("TYPESAFE_API_KEY")
-    if not key:
-        print("stale_guards: --judge needs TYPESAFE_API_KEY", file=sys.stderr)
-        raise SystemExit(3)
+    key = judge_key()
     from urllib.request import Request, urlopen
     state, questions = {}, {}
     for i, f in enumerate(findings):
@@ -316,6 +324,8 @@ def main() -> int:
                           capture_output=True).returncode != 0:
             print(f"stale_guards: cannot resolve ref {ref!r}", file=sys.stderr)
             return 2
+    if a.judge:
+        judge_key()
     run(a.base, a.head, a.judge)
     return 0
 
