@@ -103,6 +103,22 @@ def test_an_entry_point_the_diff_already_edits_is_not_reported_as_unseen(
     assert doc["unseen_entry_points"] == []
 
 
+def test_a_reached_entry_point_the_diff_already_edits_is_listed_as_in_the_diff(
+        reach, tmp_path, monkeypatch, capsys):
+    """Changed files were dropped from the reached set before this list was built, so it was
+    always empty and its report line could never print."""
+    page_body_only = FILES["app/page.tsx"].replace("return mid()", "return mid() ?? null")
+    make_repo(tmp_path, monkeypatch, {**CHANGE_SIGNATURE, "app/page.tsx": page_body_only})
+    run_reach(reach, monkeypatch, "--base", "HEAD~1", "--head", "HEAD", "--json")
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["entry_points_in_diff"] == ["app/page.tsx"] and doc["unseen_entry_points"] == []
+    run_reach(reach, monkeypatch, "--base", "HEAD~1", "--head", "HEAD")
+    out = capsys.readouterr().out
+    assert "entry points reached AND already in the diff: 1" in out
+    assert "reach: 2 JS/TS files changed, 1 files import them transitively" in out, \
+        "the count stays files OUTSIDE the diff (lib/mid.ts)"
+
+
 def test_json_report_lists_the_unseen_entry_point(reach, tmp_path, monkeypatch, capsys):
     make_repo(tmp_path, monkeypatch, CHANGE_SIGNATURE)
     run_reach(reach, monkeypatch, "--base", "HEAD~1", "--head", "HEAD", "--json")

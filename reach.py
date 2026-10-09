@@ -222,10 +222,11 @@ def main() -> int:
         print("reach: no exported symbol definitions changed — nothing to trace")
         print("\n  *** ENTRY POINTS AFFECTED BUT NOT IN THE DIFF: 0 ***")
         return 0
-    reached = reach(seeds, rev, aliases, known) - set(present)
     in_diff = set(changed)
-    unseen = sorted(f for f in reached if ENTRY.search(f) and f not in in_diff)
-    seen = sorted(f for f in reached if ENTRY.search(f) and f in in_diff)
+    reached_all = reach(seeds, rev, aliases, known)
+    reached = reached_all - in_diff
+    unseen = sorted(f for f in reached if ENTRY.search(f))
+    seen = sorted(f for f in reached_all & in_diff if ENTRY.search(f))
 
     if a.json:
         print(json.dumps({"changed": changed, "unseen_entry_points": unseen,
