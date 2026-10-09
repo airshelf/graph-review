@@ -117,6 +117,20 @@ def test_judge_flag_without_a_key_exits_3_when_there_is_something_to_ask(
     assert exc.value.code == 3 and "needs TYPESAFE_API_KEY" in capsys.readouterr().err
 
 
+def test_judge_flag_without_a_key_exits_3_even_when_the_diff_is_clean(
+        tmp_path, monkeypatch, capsys):
+    """A missing key is a wiring fault. Its exit code must not depend on what the diff holds,
+    or the fault stays hidden until the first finding."""
+    complete = with_fields("c").replace("  return true;", "  if (f.c && !r.c) return false;\n  return true;")
+    make_repo(tmp_path, monkeypatch, BEFORE, complete)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        run_main(monkeypatch, "--base", "HEAD~1", "--judge")
+    captured = capsys.readouterr()
+    assert exc.value.code == 3 and "needs TYPESAFE_API_KEY" in captured.err
+    assert captured.out == "", "no report is printed for a run that was asked to judge and could not"
+
+
 # --------------------------------------------------------------- run() with a judge
 TWO_TYPES = """export interface Foo {
   a: boolean;

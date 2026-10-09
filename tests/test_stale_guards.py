@@ -96,6 +96,39 @@ def test_evidence_carries_the_signature_and_the_declaration(monkeypatch):
     assert ev["type_declaration"] == "Row { a: boolean, b: boolean, c: boolean }"
 
 
+def test_evidence_names_the_enclosing_function(monkeypatch):
+    """The signature sits on the line above the run. A slice that started one line late
+    skipped it, so every ordinary function read "(signature not found)"."""
+    ev = _fixture_evidence(monkeypatch)
+    assert ev["enclosing_signature"] == "export function keep(r: Row, f: Row): boolean {"
+
+
+def test_evidence_picks_the_nearest_signature_above_the_run(monkeypatch):
+    blob = "\n".join([
+        "export function other(r: Row): boolean {",           # 1
+        "  return true;",                                      # 2
+        "}",                                                   # 3
+        "export const keep = (r: Row, f: Row): boolean => {",  # 4
+        "  const note = 'body line';",                         # 5
+        "  if (f.a && !r.a) return false;",                    # 6
+        "  if (f.b && !r.b) return false;",                    # 7
+    ])
+    monkeypatch.setattr(sg, "sh", lambda *args: blob)
+    ev = sg.evidence_for({"file": "row.ts", "new": ["c"], "type": "Row", "a": 6, "b": 7,
+                          "lines": [(6, "if (f.a && !r.a) return false;"),
+                                    (7, "if (f.b && !r.b) return false;")]}, "HEAD")
+    assert ev["enclosing_signature"] == "export const keep = (r: Row, f: Row): boolean => {"
+
+
+def test_evidence_finds_a_signature_on_the_first_line_of_the_file(monkeypatch):
+    blob = "function keep(r, f) {\n  if (f.a && !r.a) return false;\n  if (f.b && !r.b) return false;"
+    monkeypatch.setattr(sg, "sh", lambda *args: blob)
+    ev = sg.evidence_for({"file": "row.ts", "new": ["c"], "type": "Row", "a": 2, "b": 3,
+                          "lines": [(2, "if (f.a && !r.a) return false;"),
+                                    (3, "if (f.b && !r.b) return false;")]}, "HEAD")
+    assert ev["enclosing_signature"] == "function keep(r, f) {"
+
+
 def test_judge_without_a_key_exits_three_rather_than_guessing():
     import os
     import pytest
