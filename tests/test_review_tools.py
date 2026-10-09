@@ -159,6 +159,25 @@ def test_pr_diff_returns_one_files_hunk_or_says_there_is_none(checkout):
     assert pr_diff.invoke({"path": "other.py"}) == "no diff hunk for other.py; see changed_files"
 
 
+def test_pr_diff_matches_the_whole_path_not_the_tail_of_another(checkout):
+    """`a/lib/util.py` contains `b/util.py`, so a substring test on the header handed back
+    the hunk of a different file."""
+    _, sha = checkout
+    assert build(sha)["pr_diff"].invoke({"path": "util.py"}) == "no diff hunk for util.py; see changed_files"
+    root = "diff --git a/util.py b/util.py\n--- a/util.py\n+++ b/util.py\n@@ -1 +1 @@\n-root\n+ROOT\n"
+    hunk = build(sha, diff=DIFF + root)["pr_diff"].invoke({"path": "util.py"})
+    assert hunk == root, "the file asked for, not the first one whose path ends the same way"
+
+
+def test_pr_diff_finds_a_renamed_file_by_its_new_path(checkout):
+    _, sha = checkout
+    renamed = ("diff --git a/old name.py b/new name.py\nsimilarity index 90%\n"
+               "rename from old name.py\nrename to new name.py\n")
+    pr_diff = build(sha, diff=DIFF + renamed)["pr_diff"]
+    assert pr_diff.invoke({"path": "new name.py"}) == renamed
+    assert pr_diff.invoke({"path": "name.py"}) == "no diff hunk for name.py; see changed_files"
+
+
 def test_pr_diff_output_is_capped_with_a_narrowing_hint(checkout, monkeypatch):
     _, sha = checkout
     monkeypatch.setattr(review, "TOOL_OUTPUT_CAP", 50)
@@ -352,6 +371,14 @@ def test_public_host_refuses_private_loopback_link_local_and_reserved(monkeypatc
     assert review._public_host("https://docs.example.com/") is False
 
 
+@pytest.mark.parametrize("ip", [
+    "100.64.0.1", "100.100.100.200", "100.127.255.254", "::ffff:100.100.100.200",
+])
+def test_public_host_refuses_addresses_that_are_not_globally_routable(monkeypatch, ip):
+    _resolver(monkeypatch, {"docs.example.com": [ip]})
+    assert review._public_host("https://docs.example.com/") is False
+
+
 def test_public_host_refuses_a_name_when_any_resolved_address_is_internal(monkeypatch):
     """DNS rebinding: one public record next to one internal record is still refused,
     whichever order the resolver returns them in."""
@@ -370,6 +397,7 @@ def test_public_host_refuses_a_name_that_does_not_resolve(monkeypatch):
 
 @pytest.mark.parametrize("url", [
     "http://127.0.0.1:8080/admin", "http://[::1]/", "http://169.254.169.254/latest/meta-data/",
+    "http://100.100.100.200/",
     "http://2130706433/",  # integer-encoded 127.0.0.1; a string host check would pass it
 ])
 def test_public_host_refuses_literal_internal_addresses(url):

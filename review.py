@@ -870,8 +870,9 @@ def _public_host(url: str) -> bool:
         return False
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
+        # is_global alone is not enough: it is True for multicast.
+        if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             return False
     return True
 
@@ -996,7 +997,8 @@ def make_tools(sha: str, pr_number: int, diff: str, with_db: bool = False,
                 return cap(diff)
             chunks = re.split(r"(?m)^diff --git ", diff)
             for ch in chunks:
-                if ch and f"b/{path}" in ch.splitlines()[0]:
+                # the header is `a/<old> b/<new>`: match the whole new path, never a substring
+                if ch and ch.splitlines()[0].endswith(f" b/{path}"):
                     return cap("diff --git " + ch)
             return f"no diff hunk for {path}; see changed_files"
         return once(("pr_diff", path), produce)
