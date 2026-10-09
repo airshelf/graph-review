@@ -1,4 +1,22 @@
-# graph-review
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="graph-review logo: a spider web with one finding caught in it" width="128">
+  </picture>
+</p>
+
+<h1 align="center">graph-review</h1>
+
+<p align="center">
+  Six AI reviewers read your pull request. Three more try to prove each finding wrong.
+</p>
+
+<p align="center">
+  <a href="https://github.com/airshelf/graph-review/actions/workflows/test.yml"><img src="https://github.com/airshelf/graph-review/actions/workflows/test.yml/badge.svg?branch=main" alt="tests"></a>
+  <a href="https://github.com/airshelf/graph-review/actions/workflows/test.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/airshelf/graph-review/badges/coverage.json" alt="coverage"></a>
+  <a href="https://github.com/airshelf/graph-review/tags"><img src="https://img.shields.io/github/v/tag/airshelf/graph-review?label=version" alt="version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/airshelf/graph-review" alt="license"></a>
+</p>
 
 graph-review is a LangGraph multi-agent pull-request reviewer. It is the reviewer
 that gates every PR at AirShelf: blockers make the check red, majors withhold

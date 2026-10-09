@@ -19,3 +19,44 @@ jobs:
         run: python3 -m py_compile review.py convergence.py reach.py stale_guards.py tests/*.py
       - name: Tests
         run: uv run --python 3.12 --with pytest --with 'langchain>=1.3' --with 'langgraph>=0.6' python -m pytest -q tests
+
+  # Publishes the README coverage badge. It writes one JSON file to the `badges`
+  # branch, so only this job gets write access and it never runs on a pull request.
+  coverage-badge:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Measure coverage
+        run: uv run --python 3.12 --with pytest --with pytest-cov --with 'langchain>=1.3' --with 'langgraph>=0.6' python -m pytest -q tests --cov=. --cov-report=json:coverage-raw.json
+      - name: Publish badge data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir badge
+          python3 - <<'PY'
+          import json
+          files = json.load(open("coverage-raw.json"))["files"]
+          # Source files only. Counting the tests themselves would inflate the number.
+          src = {k: v["summary"] for k, v in files.items() if not k.startswith("tests/")}
+          if not src:
+              raise SystemExit("no source files in the coverage report")
+          total = sum(s["num_statements"] for s in src.values())
+          covered = sum(s["covered_lines"] for s in src.values())
+          pct = round(100 * covered / total)
+          color = "brightgreen" if pct >= 80 else "green" if pct >= 70 else "yellow" if pct >= 50 else "orange"
+          badge = {"schemaVersion": 1, "label": "coverage", "message": f"{pct}%", "color": color}
+          json.dump(badge, open("badge/coverage.json", "w"))
+          print(badge)
+          PY
+          cd badge
+          git init -q -b badges
+          git add coverage.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -qm 'coverage badge data'
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
