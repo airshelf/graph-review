@@ -12,6 +12,7 @@ import json
 import socket
 import subprocess
 import types
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -278,7 +279,9 @@ def test_query_prod_keeps_credentials_out_of_argv_and_forces_read_only(prod, mon
     query, psql = prod
     query.invoke({"sql": "select 1"})
     (cmd, kw), = psql.calls
-    assert not any("p@ss" in a or "p%40ss" in a or "db.example.com" in a for a in cmd)
+    dsn = urllib.parse.urlsplit(DSN)
+    leaks = (dsn.password, urllib.parse.unquote(dsn.password), dsn.hostname)
+    assert not [(part, arg) for part in leaks for arg in cmd if part in arg]
     env = kw["env"]
     assert (env["PGHOST"], env["PGPORT"], env["PGUSER"], env["PGPASSWORD"], env["PGDATABASE"]) == (
         "db.example.com", "6543", "reader", "p@ss", "appdb")
